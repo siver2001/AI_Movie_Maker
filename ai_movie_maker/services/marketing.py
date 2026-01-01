@@ -1,4 +1,6 @@
 from google.genai import types
+import time
+import random
 from pydantic import BaseModel
 from typing import List
 
@@ -14,6 +16,23 @@ class VariationItem(BaseModel):
 
 class VariationList(BaseModel):
     variations: List[VariationItem]
+
+def retry_api_call(func, *args, **kwargs):
+    max_retries = 5
+    base_delay = 2
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                if attempt == max_retries - 1:
+                    raise e
+                sleep_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"Rate limit hit. Retrying in {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
+            else:
+                raise e
 
 def generate_hooks(client, model_name, platform, must_avoid_csv):
     """
@@ -37,7 +56,8 @@ Return ONLY JSON:
     )
     
     try:
-        resp = client.models.generate_content(
+        resp = retry_api_call(
+            client.models.generate_content,
             model=model_name,
             contents=prompt,
             config=config,
@@ -64,7 +84,8 @@ Return ONLY JSON:
     )
     
     try:
-        resp = client.models.generate_content(
+        resp = retry_api_call(
+            client.models.generate_content,
             model=model_name,
             contents=prompt,
             config=config,
@@ -112,7 +133,8 @@ Ref Script:
     )
     
     try:
-        resp = client.models.generate_content(
+        resp = retry_api_call(
+            client.models.generate_content,
             model=model_name,
             contents=prompt,
             config=config,

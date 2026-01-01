@@ -4,6 +4,7 @@ pydantic
 python-dotenv
 edge-tts
 pygame
-moviepy
+moviepy<2.0.0
 numpy
 Pillow
+replicate

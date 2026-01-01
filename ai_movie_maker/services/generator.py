@@ -1,41 +1,86 @@
 import json
 import re
 from google.genai import types
+import time
+import random
 from ai_movie_maker.models.schema_v32 import ScriptV32
 from ai_movie_maker.models.schema_v31 import ScriptV31
 from ai_movie_maker.templates.prompts_v32 import SYSTEM_PROMPT_V32
 from ai_movie_maker.templates.prompts_v31 import SYSTEM_PROMPT_V31
 
-def generate_script(client, model_name, user_prompt, temperature, max_output_tokens, schema_version="v3.2"):
+
+def retry_api_call(func, *args, **kwargs):
+    max_retries = 5
+    base_delay = 2
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            # Check for 429 or ResourceExhausted in string representation
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                if attempt == max_retries - 1:
+                    raise e
+                
+                sleep_time = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"Rate limit hit. Retrying in {sleep_time:.2f}s...")
+                time.sleep(sleep_time)
+            else:
+                raise e
+
+def generate_script(client, model_name, user_prompt, temperature, max_output_tokens, schema_version="v3.2", image_part=None):
     """
     Generates a script using Gemini.
+    Optional: image_part (PIL Image or bytes) for multimodal generation.
     """
     if schema_version == "v3.2":
         system_instruction = SYSTEM_PROMPT_V32
-        response_schema = ScriptV32
+        # response_schema = ScriptV32
     else:
         system_instruction = SYSTEM_PROMPT_V31
-        response_schema = ScriptV31
+        # response_schema = ScriptV31
 
+    # NOTE: "additionalProperties" error workaround.
+    # We remove explicit response_schema and rely on 'response_mime_type="application/json"'
+    # and the strong system prompt to strictly follow the JSON structure.
+    
     config = types.GenerateContentConfig(
         temperature=temperature,
         max_output_tokens=max_output_tokens,
         response_mime_type="application/json",
-        response_schema=response_schema,
+        # response_schema=response_schema, # DISABLED TO FIX API ERROR
         system_instruction=system_instruction,
-        # seed=user_seed # Uncomment if supported by specific model version
     )
     
     try:
-        resp = client.models.generate_content(
+        # Prepare contents
+        contents = [user_prompt]
+        if image_part:
+            contents.append(image_part)
+
+        # Custom retry wrapper
+        resp = retry_api_call(
+            client.models.generate_content,
             model=model_name,
-            contents=user_prompt,
+            contents=contents,
             config=config,
         )
-        return resp.parsed
+        
+        # Parse JSON manually if not using response_schema parsing
+        if hasattr(resp, 'parsed') and resp.parsed:
+             return resp.parsed, None
+        else:
+             # Fallback manual parse
+             text = resp.text.strip()
+             if text.startswith("```json"):
+                 text = text[7:-3]
+             elif text.startswith("```"):
+                 text = text[3:-3]
+             return json.loads(text), None
+             
     except Exception as e:
         print(f"Error generating script: {e}")
-        return None
+        return None, str(e)
 
 def validate_script(script_obj, schema_version="v3.2", must_avoid_list=None):
     """

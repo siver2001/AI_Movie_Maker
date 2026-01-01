@@ -1,5 +1,5 @@
 import os
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, TextClip, ColorClip, VideoFileClip
+from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, TextClip, ColorClip, VideoFileClip, CompositeAudioClip
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import textwrap
@@ -49,56 +49,124 @@ def generate_text_image(text, size=(1920, 1080), fontsize=60, color=(255, 255, 2
         
     return np.array(img)
 
-def render_scene_video(image_path, audio_path, subtitle_text, output_path, resolution=(1080, 1920)):
+def render_scene_video(image_path, audio_path, subtitle_text, output_path, resolution=(1080, 1920), fontsize=70, color='white', video_clip_path=None):
     """
-    Renders a single scene video: Image + Audio + Subtitle.
-    Vertical resolution (1080x1920) default for Shorts/Reels.
+    Renders a single scene video: Image/Video + Audio + Subtitle.
+    Resolution determines aspect ratio (e.g. 1080x1920 for 9:16, 1920x1080 for 16:9).
     """
     try:
         # Load Audio
         audio = AudioFileClip(audio_path)
         duration = audio.duration
         
-        # Load Image
-        if image_path and os.path.exists(image_path):
-            img_clip = ImageClip(image_path).set_duration(duration)
+        # Load Video or Image as Base Clip
+        base_clip = None
+        
+        if video_clip_path and os.path.exists(video_clip_path):
+            # Use generated AI video
+            # Load video
+            raw_video = VideoFileClip(video_clip_path)
+            
+            # Loop video if shorter than audio, or cut if longer
+            if raw_video.duration < duration:
+                # Loop
+                # Calculate how many times to loop
+                # n_loops = int(duration / raw_video.duration) + 1
+                base_clip = raw_video.loop(duration=duration)
+            else:
+                base_clip = raw_video.subclip(0, duration)
+                
+            # Mute raw video audio if present
+            base_clip = base_clip.without_audio()
+            
+        elif image_path and os.path.exists(image_path):
+            base_clip = ImageClip(image_path).set_duration(duration)
         else:
             # Fallback black screen
-            img_clip = ColorClip(size=resolution, color=(0,0,0)).set_duration(duration)
+            base_clip = ColorClip(size=resolution, color=(0,0,0)).set_duration(duration)
             
-        # Resize/Crop Image to fill screen
-        # img_clip = img_clip.resize(height=resolution[1]) # Simple resize, improvement: crop to center
-        # Center crop check
-        img_clip = img_clip.resize(height=resolution[1])
-        if img_clip.w < resolution[0]:
-             img_clip = img_clip.resize(width=resolution[0])
-        img_clip = img_clip.set_position("center")
+        # Smart Resize/Crop to fill screen without distortion
+        # Same logic for Image or Video
+        img_w, img_h = base_clip.size
+        # Caluclate target ratios
+        target_ratio = resolution[0] / resolution[1]
+        img_ratio = img_w / img_h
+        
+        if img_ratio > target_ratio:
+            # Wide: resize by height then center crop width
+            base_clip = base_clip.resize(height=resolution[1])
+            # Crop center
+            req_width = resolution[0]
+            current_width = base_clip.w
+            x_center = current_width / 2
+            base_clip = base_clip.crop(x1=x_center - req_width/2, width=req_width)
+        else:
+            # Tall: resize by width then center crop height
+            base_clip = base_clip.resize(width=resolution[0])
+            req_height = resolution[1]
+            current_height = base_clip.h
+            y_center = current_height / 2
+            base_clip = base_clip.crop(y1=y_center - req_height/2, height=req_height)
+            
+        base_clip = base_clip.set_position("center")
             
         # Create Subtitle (using Pillow -> numpy array -> ImageClip)
-        # 1080x1920
-        # Text bottom area
-        txt_img = generate_text_image(subtitle_text, size=resolution, fontsize=70)
+        txt_img = generate_text_image(subtitle_text, size=resolution, fontsize=fontsize, color=color)
         txt_clip = ImageClip(txt_img).set_duration(duration).set_position("center")
         
         # Composite
-        video = CompositeVideoClip([img_clip, txt_clip])
+        video = CompositeVideoClip([base_clip, txt_clip])
         video = video.set_audio(audio)
         video = video.set_duration(duration)
         
+        # Write file
         video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+        
+        # Close clips to release resources
+        if video_clip_path and os.path.exists(video_clip_path):
+             # Explicitly close the raw video reader to avoid file locks
+             try:
+                 raw_video.reader.close()
+                 if raw_video.audio: raw_video.audio.reader.close_proc()
+             except: pass
+
         return True, output_path
     
     except Exception as e:
         print(f"Error rendering scene: {e}")
         return False, str(e)
 
-def assemble_full_movie(scene_videos, output_path):
+def assemble_full_movie(scene_videos, output_path, bg_music_path=None, transition_duration=0.5):
     """
     Concatenates rendered scene videos into a final movie.
+    Adds background music (looped/ducked) and simple crossfade transitions if supported.
     """
     try:
-        clips = [VideoFileClip(v) for v in scene_videos]
-        final_video = concatenate_videoclips(clips)
+        clips = []
+        for v in scene_videos:
+            clip = VideoFileClip(v)
+            # Add simple fadein/out for smoothness
+            clip = clip.fadein(0.2).fadeout(0.2)
+            clips.append(clip)
+            
+        final_video = concatenate_videoclips(clips, method="compose") # compose supports potential overlaps/transitions better
+        
+        # Background Music
+        if bg_music_path and os.path.exists(bg_music_path):
+            bg_music = AudioFileClip(bg_music_path)
+            # Loop bg_music to match video duration
+            if bg_music.duration < final_video.duration:
+                 bg_music = bg_music.loop(duration=final_video.duration)
+            else:
+                 bg_music = bg_music.subclip(0, final_video.duration)
+                 
+            # Ducking: Bg music should be quieter (e.g. 20%)
+            bg_music = bg_music.volumex(0.2)
+            
+            # Mix with original audio (Voice)
+            final_audio = CompositeAudioClip([final_video.audio, bg_music])
+            final_video = final_video.set_audio(final_audio)
+        
         final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
         return True, output_path
     except Exception as e:

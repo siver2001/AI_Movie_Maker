@@ -18,6 +18,7 @@ try:
         generate_hooks, generate_ctas, generate_variations
     )
     from ai_movie_maker.services.audio import generate_audio_sync
+    from ai_movie_maker.services.video_ai import generate_video_clip
     # Load presets
     with open(os.path.join(os.path.dirname(__file__), 'config/presets.json'), 'r', encoding='utf-8') as f:
         PRESETS = json.load(f)
@@ -47,10 +48,79 @@ st.markdown("Dynamic Config + Campaign Mode + Hook/CTA Lab + Auto-Repair")
 # --- SIDEBAR CONFIG ---
 st.sidebar.header("1. Configuration")
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
-model_name = st.sidebar.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash-exp"], index=0)
+replicate_api_token = st.sidebar.text_input("Replicate API Token (Optional, for 🎬 AI Video)", type="password")
+
+# Helper to auto-select model
+if 'detected_models' in st.session_state and st.session_state['detected_models']:
+    st.sidebar.markdown("---")
+    st.sidebar.caption("👇 Select a detected model:")
+    selected_model_auto = st.sidebar.selectbox("Detected Models", st.session_state['detected_models'], key="auto_model_select")
+    if st.sidebar.button("Use This Model"):
+        st.session_state['model_name_input'] = selected_model_auto
+        st.session_state['model_name_confirmed'] = selected_model_auto
+        st.rerun()
+
+# We use a key 'model_name_input' so we can update it programmatically
+if 'model_name_input' not in st.session_state:
+    st.session_state['model_name_input'] = "gemini-2.5-flash"
+
+model_name_input = st.sidebar.text_input("Model Name", key="model_name_input")
 temperature = st.sidebar.slider("Temperature", 0.0, 1.0, 0.7)
 max_tokens = st.sidebar.number_input("Max Tokens", 1000, 10000, 8192)
 
+# Confirm / Connect Button
+col_btn1, col_btn2 = st.sidebar.columns(2)
+with col_btn1:
+    if st.button("Connect & Confirm"):
+        if not api_key:
+            st.sidebar.error("❌ Missing API Key")
+        elif not model_name_input:
+            st.sidebar.error("❌ Missing Model Name")
+        else:
+            st.sidebar.success(f"✅ Configured")
+            st.session_state['api_key_confirmed'] = api_key
+            st.session_state['model_name_confirmed'] = model_name_input
+
+with col_btn2:
+    if st.button("🔍 Check Models"):
+        if not api_key:
+            st.sidebar.error("Need API Key")
+        else:
+            try:
+                client = genai.Client(api_key=api_key)
+                # List models
+                models = list(client.models.list())
+                # Filter for gemini models
+                valid_models = []
+                for m in models:
+                    # m is likely an object with .name attribute
+                    if hasattr(m, 'name') and "gemini" in m.name.lower():
+                        valid_models.append(m.name.split("/")[-1])
+                    elif isinstance(m, str) and "gemini" in m.lower():
+                        # In case it returns strings
+                        valid_models.append(m.split("/")[-1])
+                
+                if valid_models:
+                    st.session_state['detected_models'] = valid_models
+                    st.sidebar.success(f"Found {len(valid_models)} models!")
+                else:
+                    st.sidebar.warning("No clear Gemini models found.")
+            except Exception as e:
+                st.sidebar.error(f"Error: {e}")
+
+
+
+# Use confirmed values if available
+if 'api_key_confirmed' in st.session_state:
+    api_key = st.session_state['api_key_confirmed']
+    model_name = st.session_state['model_name_confirmed']
+else:
+    # If not confirmed, we can still use raw inputs but maybe show warning?
+    # User asked for error if not confirmed? "báo lỗi nếu chưa điền".
+    # We'll use the inputs directly but check validty at generation time too.
+    model_name = model_name_input
+
+st.sidebar.divider()
 st.sidebar.header("2. Script Controls")
 scene_count = st.sidebar.slider("Scene Count", 3, 5, 3)
 mood = st.sidebar.selectbox("Mood", ["Cinematic Drama", "High Energy", "Funny", "Emotional", "Horror"])
@@ -255,7 +325,25 @@ with tab_main:
             with st.spinner("Generating script..."):
                 # We are passing the user_seed if > 0, though we didn't firmly implement it in gen.py yet as API might vary.
                 # But we have the input now.
-                script_obj = generate_script(client, model_name, final_prompt, temperature, max_tokens, sv_code)
+                raw_result, err_msg = generate_script(client, model_name, final_prompt, temperature, max_tokens, sv_code)
+                
+                script_obj = None
+                if raw_result:
+                    try:
+                         if sv_code == "v3.2":
+                             from ai_movie_maker.models.schema_v32 import ScriptV32
+                             script_obj = ScriptV32(**raw_result)
+                         else:
+                             from ai_movie_maker.models.schema_v31 import ScriptV31
+                             script_obj = ScriptV31(**raw_result)
+                    except Exception as e:
+                         st.error(f"Schema Validation Failed: {e}")
+                         st.json(raw_result)
+                elif err_msg:
+                    st.error(f"Generation Error: {err_msg}")
+                    # Special hint for 429
+                    if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                        st.warning("⚠️ Tips: Try switching to 'gemini-1.5-flash' for higher rate limits!")
                 
                 if script_obj:
                     # Validate
@@ -270,8 +358,19 @@ with tab_main:
                         for i in issues:
                             st.caption(f"- {i}")
                         
-                        script_obj = repair_script(client, model_name, script_obj, issues, sv_code)
-                        st.success("Auto-repair completed.")
+                        repaired_data, repair_err = repair_script(client, model_name, script_obj, issues, sv_code)
+                        if repaired_data:
+                            try:
+                                if sv_code == "v3.2":
+                                    script_obj = ScriptV32(**repaired_data)
+                                else:
+                                    script_obj = ScriptV31(**repaired_data)
+                                st.success("Auto-repair completed.")
+                            except Exception as e:
+                                st.warning(f"Repair succeeded but validation failed: {e}")
+                                # keep original script_obj if repair fails to parse
+                        else:
+                            st.warning(f"Auto-repair failed: {repair_err}")
                     
                     st.session_state['current_script'] = script_obj
                     st.session_state['schema_version'] = sv_code
@@ -315,9 +414,20 @@ with tab_main:
                                 st.rerun()
                 
                 with c2:
-                    st.markdown(f"**Visual:** {scene.visual_prompt.positive}")
-                    st.markdown(f"**Audio:** {scene.audio.sfx} | {scene.audio.music_mood}")
-                    st.info(f"🗣 **{scene.dialogue.voice_gender}:** {scene.dialogue.text}")
+                    # Editable Visual Prompt
+                    new_visual = st.text_area(f"🎨 Visual Prompt {scene.scene_id}", value=scene.visual_prompt.positive, key=f"vis_{i}")
+                    scene.visual_prompt.positive = new_visual
+
+                    # Editable Audio Prompt
+                    new_audio_sfx = st.text_input(f"🔊 SFX {scene.scene_id}", value=scene.audio.sfx, key=f"sfx_{i}")
+                    new_audio_mood = st.text_input(f"🎵 Music Mood {scene.scene_id}", value=scene.audio.music_mood, key=f"mood_{i}")
+                    scene.audio.sfx = new_audio_sfx
+                    scene.audio.music_mood = new_audio_mood
+
+                    # Editable Dialogue
+                    st.markdown(f"**🗣 Voice: {scene.dialogue.voice_gender}**")
+                    new_dialogue = st.text_area(f"💬 Dialogue {scene.scene_id}", value=scene.dialogue.text, height=100, key=f"dlg_{i}")
+                    scene.dialogue.text = new_dialogue
                     
                     # Audio Generation UI
                     from ai_movie_maker.services.audio import VOICE_MAP
@@ -350,8 +460,12 @@ with tab_main:
                         if hasattr(scene, 'camera'):
                             st.caption(f"Camera: {scene.camera}")
 
-                    # --- MEDIA & RENDERING ---
+# --- MEDIA & RENDERING ---
                     st.divider()
+                    
+                    # Video Settings UI (Sidebar or here?)
+                    # Let's put global settings in Sidebar or an Expander
+                    
                     m1, m2 = st.columns([1, 1])
                     
                     with m1:
@@ -366,6 +480,26 @@ with tab_main:
                             with open(img_path, "wb") as f:
                                 f.write(uploaded_img.getbuffer())
                             st.image(img_path, width=200)
+                            
+                            # AI Video Generation
+                            ai_vid_key = f"ai_vid_{scene.scene_id}_{i}"
+                            raw_vid_path = f"video_scene_{scene.scene_id}_raw.mp4"
+                            
+                            if st.button(f"🎬 Generate AI Motion", key=ai_vid_key):
+                                if not replicate_api_token:
+                                    st.error("Please enter Replicate API Token in sidebar.")
+                                else:
+                                    with st.spinner("Generating AI Video (this takes ~1-2 mins)..."):
+                                        success, res = generate_video_clip(replicate_api_token, img_path, raw_vid_path)
+                                        if success:
+                                            st.success("AI Video Generated!")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Failed: {res}")
+                            
+                            if os.path.exists(raw_vid_path):
+                                st.caption("✅ AI Video Ready")
+                                st.video(raw_vid_path)
                     
                     with m2:
                         # Render Scene Button
@@ -382,17 +516,42 @@ with tab_main:
                                 
                                 output_video = f"scene_{scene.scene_id}.mp4"
                                 with st.spinner("Rendering video..."):
-                                    # Assuming import is available
-                                    # We need to import inside or top. Let's do lazy import or assume top.
-                                    # We added import to app.py? Not yet.
-                                    from ai_movie_maker.services.video import render_scene_video
-                                    success, res = render_scene_video(img_path, audio_path, scene.dialogue.text, output_video)
+                                    try:
+                                        from ai_movie_maker.services.video import render_scene_video
+                                    except ImportError:
+                                        st.error(f"⚠️ Library Update Required: {e}. Please RESTART the terminal/app to load the correct MoviePy version.")
+                                        st.stop()
+                                    # Get settings from sidebar or default
+                                    ar_choice = st.session_state.get('aspect_ratio', '9:16 (Shorts)')
+                                    res = (1080, 1920) if '9:16' in ar_choice else (1920, 1080)
+                                    font_s = st.session_state.get('sub_font_size', 70)
+                                    sub_c = st.session_state.get('sub_color', 'white')
+                                    
+                                    # Check for AI video
+                                    raw_vid_path = f"video_scene_{scene.scene_id}_raw.mp4"
+                                    video_input = raw_vid_path if os.path.exists(raw_vid_path) else None
+
+                                    success, res_msg = render_scene_video(img_path, audio_path, scene.dialogue.text, output_video, resolution=res, fontsize=font_s, color=sub_c, video_clip_path=video_input)
                                     if success:
                                         st.video(output_video)
                                     else:
-                                        st.error(f"Render failed: {res}")
+                                        st.error(f"Render failed: {res_msg}")
         
         st.divider()
+        
+        # Full Movie Settings
+        with st.expander("🎞 Movie Settings (Mixing & Ratio)"):
+             st.session_state['aspect_ratio'] = st.selectbox("Aspect Ratio", ["9:16 (Shorts/Reels)", "16:9 (YouTube/TV)"], index=0)
+             st.session_state['sub_font_size'] = st.slider("Subtitle Size", 30, 120, 70)
+             st.session_state['sub_color'] = st.color_picker("Subtitle Color", "#FFFFFF")
+             bg_music_file = st.file_uploader("🎵 Background Music (Optional)", type=["mp3", "wav"])
+             
+             bg_music_path = None
+             if bg_music_file:
+                 bg_music_path = "bg_music_temp.mp3"
+                 with open(bg_music_path, "wb") as f:
+                     f.write(bg_music_file.getbuffer())
+
         if st.button("🎞 Render Full Movie", type="primary"):
              # Check if all scenes have videos
              videos = []
@@ -400,16 +559,25 @@ with tab_main:
              for s in script.scenes:
                  v_path = f"scene_{s.scene_id}.mp4"
                  if not os.path.exists(v_path):
-                     st.error(f"Scene {s.scene_id} video not rendered yet.")
+                     st.error(f"Scene {s.scene_id} video not rendered yet. Please render all scenes above first.")
                      all_ready = False
                  else:
                      videos.append(v_path)
              
              if all_ready:
-                 with st.spinner("Assembling Full Movie..."):
-                     from ai_movie_maker.services.video import assemble_full_movie
+                 with st.spinner("Assembling Full Movie (This may take a minute)..."):
+                     try:
+                         from ai_movie_maker.services.video import assemble_full_movie
+                     except ImportError:
+                         st.error(f"⚠️ Library Update Required: {e}. Please RESTART the terminal/app to load the correct MoviePy version.")
+                         st.stop()
                      final_out = f"final_movie_{script.project_title.replace(' ', '_')}.mp4"
-                     success, msg = assemble_full_movie(videos, final_out)
+                     
+                     # Re-use the bg_music_path defined in expander scope if available
+                     # Note: Streamlit re-runs script on interaction, so we need to ensure file is saved/accessible.
+                     # If uploader is in expander, it might clear on re-run if not careful, but for now we assume persistent within session same run.
+                     
+                     success, msg = assemble_full_movie(videos, final_out, bg_music_path=bg_music_path)
                      if success:
                          st.success("Movie Rendered Successfully!")
                          st.video(final_out)
