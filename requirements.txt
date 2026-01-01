@@ -1,0 +1,9 @@
+streamlit
+google-genai
+pydantic
+python-dotenv
+edge-tts
+pygame
+moviepy
+numpy
+Pillow

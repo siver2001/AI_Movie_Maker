@@ -1,0 +1,28 @@
+{
+    "visual_styles": {
+        "Cinematic Drama": "cinematic lighting, shallow depth of field, anamorphic lens, 8k, highly detailed, moody atmosphere",
+        "Neo-Noir Saigon": "neon lights, rain-slicked streets, high contrast, cyber-punk vibes, futuristic Saigon, mystery, 8k",
+        "Bright & Commercial": "high key lighting, clean background, bright colors, commercial look, studio quality, sharp focus",
+        "Minimalist": "minimalist aesthetic, soft pastel colors, ample negative space, clean lines, modern, elegant",
+        "Retro 90s": "vintage 90s vibe, film grain, slightly washed out colors, vhs overlay effect, nostalgic"
+    },
+    "brand_voices": {
+        "Playful & GenZ": "playful, trendy, uses GenZ slang naturally, high energy, fast-paced",
+        "Professional & Trustworthy": "calm, authoritative, respectful, clear, concise, expert tone",
+        "Luxury & Premium": "elegant, sophisticated, slow-paced, poetic, emphasis on quality and exclusivity",
+        "Friendly & Neighbor": "warm, approachable, casual, down-to-earth, like advice from a friend"
+    },
+    "campaign_types": [
+        "UGC Review",
+        "Unboxing",
+        "Before-After",
+        "Mini-drama",
+        "Explainer",
+        "Testimonial"
+    ],
+    "platforms": [
+        "TikTok",
+        "Reels",
+        "Shorts"
+    ]
+}
