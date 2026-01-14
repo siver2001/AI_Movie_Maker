@@ -8,3 +8,8 @@ moviepy<2.0.0
 numpy
 Pillow
 replicate
+demucs
+openai-whisper
+pydub
+ffmpeg-python
+yt-dlp
